@@ -16,87 +16,96 @@ mod benchmarking;
 
 #[frame_support::pallet]
 pub mod pallet {
-	use frame_support::pallet_prelude::*;
+	use frame_support::{dispatch::DispatchResultWithPostInfo, pallet_prelude::*};
 	use frame_system::pallet_prelude::*;
 
-	/// Configure the pallet by specifying the parameters and types on which it depends.
+	// The struct on which we build all of our Pallet logic.
+    #[pallet::pallet]
+    pub struct Pallet<T>(_);
+
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
-		/// Because this pallet emits events, it depends on the runtime's definition of an event.
+		/// The overarching event type.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 	}
 
-	#[pallet::pallet]
-	#[pallet::generate_store(pub(super) trait Store)]
-	pub struct Pallet<T>(_);
-
-	// The pallet's runtime storage items.
-	// https://docs.substrate.io/v3/runtime/storage
-	#[pallet::storage]
-	#[pallet::getter(fn something)]
-	// Learn more about declaring storage items:
-	// https://docs.substrate.io/v3/runtime/storage#declaring-storage-items
-	pub type Something<T> = StorageValue<_, u32>;
-
-	// Pallets use events to inform users when important changes are made.
-	// https://docs.substrate.io/v3/runtime/events-and-errors
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		/// Event documentation should end with an array that provides descriptive names for event
-		/// parameters. [something, who]
-		SomethingStored(u32, T::AccountId),
+		/// Token was initialized by user
+		Initialized(T::AccountId),
+		/// Tokens successfully transferred between users
+		Transfer(T::AccountId, T::AccountId, u64), // (from, to, value)
 	}
 
-	// Errors inform users that something went wrong.
+	#[pallet::storage]
+	pub(super) type Balances<T: Config> =
+		StorageMap<_, Blake2_128Concat, T::AccountId, u64, ValueQuery>;
+
+	#[pallet::type_value]
+	pub(super) fn TotalSupplyDefaultValue<T: Config>() -> u64 {
+		21000000
+	}
+
+	#[pallet::storage]
+	pub(super) type TotalSupply<T: Config> =
+		StorageValue<_, u64, ValueQuery, TotalSupplyDefaultValue<T>>;
+
+	#[pallet::storage]
+	pub(super) type Init<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
+
 	#[pallet::error]
 	pub enum Error<T> {
-		/// Error names should be descriptive.
-		NoneValue,
-		/// Errors should have helpful documentation associated with them.
-		StorageOverflow,
+		/// Attempted to initialize the token after it had already been initialized.
+		AlreadyInitialized,
+		/// Attempted to transfer more funds than were available
+		InsufficientFunds,
 	}
 
-	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
-	// These functions materialize as "extrinsics", which are often compared to transactions.
-	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// An example dispatchable that takes a singles value as a parameter, writes the value to
-		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
-		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
-		pub fn do_something(origin: OriginFor<T>, something: u32) -> DispatchResult {
-			// Check that the extrinsic was signed and get the signer.
-			// This function will return an error if the extrinsic is not signed.
-			// https://docs.substrate.io/v3/runtime/origins
-			let who = ensure_signed(origin)?;
+		/// Initialize the token
+		/// transfers the total_supply amout to the caller
+		#[pallet::weight(10_000)]
+		pub fn init(_origin: OriginFor<T>) -> DispatchResultWithPostInfo {
+			let sender = ensure_signed(_origin)?;
+			ensure!(!<Init<T>>::get(), <Error<T>>::AlreadyInitialized);
 
-			// Update storage.
-			<Something<T>>::put(something);
+			<Balances<T>>::insert(sender.clone(), <TotalSupply<T>>::get());
 
-			// Emit an event.
-			Self::deposit_event(Event::SomethingStored(something, who));
-			// Return a successful DispatchResultWithPostInfo
-			Ok(())
+			Init::<T>::put(true);
+			Self::deposit_event(Event::Initialized(sender));
+			Ok(().into())
 		}
 
-		/// An example dispatchable that may throw a custom error.
-		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1))]
-		pub fn cause_error(origin: OriginFor<T>) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+		/// Transfer tokens from one account to another
+		#[pallet::weight(10_000)]
+		pub fn transfer(
+			_origin: OriginFor<T>,
+			to: T::AccountId,
+			value: u64,
+		) -> DispatchResultWithPostInfo {
+			let sender = ensure_signed(_origin)?;
+			let sender_balance = <Balances<T>>::get(&sender);
+			let receiver_balance = <Balances<T>>::get(&to);
 
-			// Read a value from storage.
-			match <Something<T>>::get() {
-				// Return an error if the value has not been set.
-				None => return Err(Error::<T>::NoneValue.into()),
-				Some(old) => {
-					// Increment the value read from storage; will error in the event of overflow.
-					let new = old.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					// Update the value in storage with the incremented result.
-					<Something<T>>::put(new);
-					Ok(())
-				},
-			}
+			// Calculate new balances
+			let updated_from_balance = sender_balance
+				.checked_sub(value)
+				.ok_or(<Error<T>>::InsufficientFunds)?;
+			let updated_to_balance = receiver_balance
+				.checked_add(value)
+				.expect("Entire supply fits in u64; qed");
+
+			// Write new balances to storage
+			<Balances<T>>::insert(&sender, updated_from_balance);
+			<Balances<T>>::insert(&to, updated_to_balance);
+
+			Self::deposit_event(Event::Transfer(sender, to, value));
+			Ok(().into())
 		}
 	}
 }
